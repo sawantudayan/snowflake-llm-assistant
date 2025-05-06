@@ -9,13 +9,14 @@ from transformers import AutoTokenizer, AutoModel
 # Load env vars
 load_dotenv()
 logger = logging.getLogger(__name__)
+print(torch.cuda.is_available())
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 MODEL_NAME = os.getenv("EMBEDDING_MODEL_NAME", "thenlper/gte-small")
 
 try:
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-    model = AutoModel.from_pretrained(MODEL_NAME).to(DEVICE).eval()
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, force_download=True)
+    model = AutoModel.from_pretrained(MODEL_NAME, force_download=True).to(DEVICE).eval()
     logger.info(f"Successfully loaded {MODEL_NAME} on {DEVICE}")
 except Exception as e:
     logger.error(f"Failed to load embedding model: {e}")
