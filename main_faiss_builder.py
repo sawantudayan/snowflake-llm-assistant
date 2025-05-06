@@ -1,64 +1,61 @@
-import pickle
+import logging
+import time
 
 import faiss
 import numpy as np
-from tqdm import tqdm
 
-from utils.embedding_utils import get_gte_small_embedding
-from utils.snowflake_connector import get_snowflake_connection
+from utils.embedding_utils import generate_embeddings
+from utils.snowflake_utils import fetch_chunks_from_snowflake
 
-VECTOR_DIM = 384
-INDEX_PATH = "vector_index.faiss"
-METADATA_PATH = "chunk_metadata.pkl"
-
-
-def fetch_chunks_from_snowflake():
-    conn = get_snowflake_connection()
-    cursor = conn.cursor()
-
-    cursor.execute("SELECT chunk_id, chunk_text, document_id FROM genai_assistant.unstructured_data.document_chunks")
-    rows = cursor.fetchall()
-
-    chunks = [{"chunk_id": r[0], "chunk_text": r[1], "document_id": r[2]} for r in rows]
-    return chunks
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
-def build_faiss_index(chunks):
-    index = faiss.IndexFlatL2(VECTOR_DIM)
-    metadata = []
+def build_faiss_index():
+    start_time = time.time()
+    logger.info("🔄 Fetching document chunks from Snowflake...")
 
-    for chunk in tqdm(chunks, desc="Embedding & Indexing"):
-        try:
-            embedding = get_gte_small_embedding(chunk["chunk_text"])
-            embedding = np.array(embedding, dtype=np.float32)
+    try:
+        # Fetch document chunks from Snowflake
+        chunks = fetch_chunks_from_snowflake()
+        if not chunks:
+            raise ValueError("No chunks found in Snowflake.")
 
-            if embedding.shape != (VECTOR_DIM,):
-                print(f"Skipping chunk {chunk['chunk_id']} due to incorrect shape: {embedding.shape}")
-                continue
+        # Extract texts and chunk IDs
+        texts = [chunk['chunk_text'] for chunk in chunks]
+        chunk_ids = [chunk['chunk_id'] for chunk in chunks]
 
-            index.add(np.expand_dims(embedding, axis=0))
-            metadata.append(chunk)
-        except Exception as e:
-            print(f"Embedding failed for chunk {chunk['chunk_id']}: {e}")
+        # Generate embeddings
+        logger.info("🧠 Generating embeddings using Hugging Face API...")
+        embeddings = generate_embeddings(texts)
 
-    return index, metadata
+        if not embeddings:
+            raise RuntimeError("No embeddings generated. FAISS index cannot be built.")
 
+        # Convert to float32 NumPy array for FAISS
+        embedding_matrix = np.array(embeddings).astype("float32")
 
-def save_index(index, metadata):
-    faiss.write_index(index, INDEX_PATH)
-    with open(METADATA_PATH, "wb") as f:
-        pickle.dump(metadata, f)
+        # Build FAISS index
+        index = faiss.IndexFlatL2(embedding_matrix.shape[1])
+        index.add(embedding_matrix)
+
+        # Optional: Save the FAISS index and metadata
+        faiss.write_index(index, "faiss_index.bin")
+        with open("chunk_ids.txt", "w") as f:
+            for chunk_id in chunk_ids:
+                f.write(f"{chunk_id}\n")
+
+        logger.info(f"✅ FAISS index built and saved with {len(chunk_ids)} entries.")
+
+    except Exception as e:
+        logger.error(f"❌ Error during FAISS index build: {e}")
+        raise e
+
+    finally:
+        elapsed = round(time.time() - start_time, 2)
+        logger.info(f"⏱️ Total time: {elapsed} seconds.")
 
 
 if __name__ == "__main__":
-    print("Fetching chunks from Snowflake...")
-    chunks = fetch_chunks_from_snowflake()
-    print(f"Fetched {len(chunks)} chunks.")
-
-    print("Building FAISS index...")
-    index, metadata = build_faiss_index(chunks)
-
-    print("Saving index and metadata...")
-    save_index(index, metadata)
-
-    print("✅ FAISS index and metadata saved.")
+    build_faiss_index()
