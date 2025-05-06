@@ -1,7 +1,7 @@
 # Core dependencies
 streamlit
 python-dotenv==1.0.1
-requests==2.31.0
+requests==2.32.2
 pymupdf==1.23.22
 snowflake-connector-python
 faiss-cpu
