@@ -1,75 +1,74 @@
 import logging
+import os
 from typing import List
 
-import requests
+import torch
+from dotenv import load_dotenv
+from transformers import AutoTokenizer, AutoModel
 
-# Set up logging
+# Load env vars
+load_dotenv()
 logger = logging.getLogger(__name__)
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-# Correct Hugging Face API settings
-HUGGINGFACE_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
-HUGGINGFACE_API_URL = f"https://api-inference.huggingface.co/models/{HUGGINGFACE_MODEL}"
+MODEL_NAME = os.getenv("EMBEDDING_MODEL_NAME", "thenlper/gte-small")
 
-HF_API_KEY = "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"  # Replace with env var or hardcoded for testing
+try:
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    model = AutoModel.from_pretrained(MODEL_NAME).to(DEVICE).eval()
+    logger.info(f"Successfully loaded {MODEL_NAME} on {DEVICE}")
+except Exception as e:
+    logger.error(f"Failed to load embedding model: {e}")
+    raise
 
-HEADERS = {
-    "Authorization": f"Bearer {HF_API_KEY}",
-    "Content-Type": "application/json"
-}
+
+def mean_pooling(last_hidden_state, attention_mask):
+    """Performs mean pooling on token embeddings."""
+    expanded_mask = attention_mask.unsqueeze(-1).expand(last_hidden_state.size())
+    return (last_hidden_state * expanded_mask).sum(1) / expanded_mask.sum(1)
 
 
 def validate_hf_model_connection() -> bool:
     """
-    Validates the model endpoint and token.
+    Simulates validation for local model. Always returns True unless model failed to load.
     """
-    logger.info("🔍 Validating Hugging Face API access and model availability...")
-
     try:
-        response = requests.get(HUGGINGFACE_API_URL, headers=HEADERS)
-        if response.status_code == 200:
-            logger.info("✅ Hugging Face model is accessible.")
-            return True
-        elif response.status_code == 401:
-            logger.error("❌ Unauthorized: Invalid or missing Hugging Face API token.")
-        elif response.status_code == 404:
-            logger.error("❌ Model not found. Check model name.")
-        else:
-            logger.error(f"❌ Unexpected error: {response.status_code} - {response.text}")
-    except requests.exceptions.RequestException as e:
-        logger.error(f"❌ Network error while connecting to Hugging Face: {e}")
-
-    return False
+        _ = tokenizer("test", return_tensors="pt")
+        logger.info("Local embedding model ready.")
+        return True
+    except Exception as e:
+        logger.error(f"Local model validation failed: {e}")
+        return False
 
 
-def generate_embeddings(texts: List[str]) -> List[List[float]]:
+def generate_embeddings(texts: List[str], batch_size: int = 16) -> List[List[float]]:
     """
-    Sends a list of texts to Hugging Face and returns embeddings.
+    Generates embeddings for a list of texts using a local Hugging Face model.
     """
     if not validate_hf_model_connection():
-        raise RuntimeError("Failed to connect to Hugging Face model endpoint.")
+        raise RuntimeError("Local Hugging Face embedding model not available.")
 
-    logger.info(f"📡 Sending {len(texts)} texts to Hugging Face for embedding...")
+    logger.info(f"Generating embeddings locally for {len(texts)} texts...")
 
-    try:
-        response = requests.post(
-            HUGGINGFACE_API_URL,
-            headers=HEADERS,
-            json={"sentences": texts}  # Updated to use 'sentences' instead of 'inputs'
-        )
-        response.raise_for_status()
+    embeddings = []
 
-        embeddings = response.json()
+    for i in range(0, len(texts), batch_size):
+        batch = texts[i:i + batch_size]
+        inputs = tokenizer(
+            batch,
+            padding=True,
+            truncation=True,
+            max_length=512,
+            return_tensors="pt"
+        ).to(DEVICE)
 
-        # Validate format
-        if not isinstance(embeddings, list):
-            raise ValueError("❌ Invalid response format: Expected list of embeddings.")
+        with torch.no_grad():
+            outputs = model(**inputs)
 
-        logger.info("✅ Embeddings received successfully.")
-        return embeddings
+        pooled = mean_pooling(outputs.last_hidden_state, inputs['attention_mask'])
+        pooled_np = pooled.cpu().numpy()
 
-    except requests.exceptions.HTTPError as e:
-        logger.error(f"❌ Hugging Face API error: {e.response.status_code} - {e.response.text}")
-    except Exception as e:
-        logger.error(f"❌ Unexpected error during embedding: {e}")
+        embeddings.extend(pooled_np.tolist())
 
-    return []
+    logger.info("Embeddings generated successfully.")
+    return embeddings
