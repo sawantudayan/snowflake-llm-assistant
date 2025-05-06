@@ -53,30 +53,61 @@ def fetch_chunks_from_snowflake():
     return chunks
 
 
-def insert_embeddings_to_snowflake(chunk_id, document_id, chunk_text, embedding):
+def insert_embeddings_to_snowflake(chunk_id, document_id, chunk_text, embedding, chunk_index=None):
     """
-    Insert embedding as proper VARIANT using parse_json() wrapper.
-    Embedding is passed as a JSON string to be interpreted as VARIANT in Snowflake.
+    Insert or update document chunk and its embedding into Snowflake.
+    Embedding is automatically serialized to JSON and stored as a VARIANT.
+
+    Parameters:
+    - chunk_id: str
+    - document_id: str
+    - chunk_text: str
+    - embedding: List[float] or np.ndarray
+    - chunk_index: int or None
     """
     try:
+        # Serialize embedding to JSON string
+        embedding_json = json.dumps(embedding)
+
+        # Establish connection
         conn = get_snowflake_connection()
         cursor = conn.cursor()
 
-        insert_query = """
-        INSERT INTO GENAI_ASSISTANT.UNSTRUCTURED_DATA.DOCUMENT_CHUNKS 
-        (CHUNK_ID, DOCUMENT_ID, CHUNK_TEXT, EMBEDDING)
-        SELECT %s, %s, %s, PARSE_JSON(%s)
+        # MERGE query to UPSERT (insert or update) embedding
+        merge_query = """
+        MERGE INTO GENAI_ASSISTANT.UNSTRUCTURED_DATA.DOCUMENT_CHUNKS AS target
+        USING (
+            SELECT 
+                %s AS chunk_id, 
+                %s AS document_id, 
+                %s AS chunk_text, 
+                PARSE_JSON(%s) AS embedding, 
+                %s AS chunk_index
+        ) AS source
+        ON target.chunk_id = source.chunk_id
+        WHEN MATCHED THEN
+            UPDATE SET 
+                target.embedding = source.embedding,
+                target.chunk_index = COALESCE(target.chunk_index, source.chunk_index)
+        WHEN NOT MATCHED THEN
+            INSERT (chunk_id, document_id, chunk_text, embedding, chunk_index)
+            VALUES (source.chunk_id, source.document_id, source.chunk_text, source.embedding, source.chunk_index);
         """
 
-        embedding_json = json.dumps(embedding)
-        logger.info(f"Inserting chunk: {chunk_id}, embedding_dim: {len(embedding)}")
-
-        cursor.execute(insert_query, (chunk_id, document_id, chunk_text, embedding_json))
+        # Execute with params
+        cursor.execute(merge_query, (
+            chunk_id,
+            document_id,
+            chunk_text,
+            embedding_json,
+            chunk_index
+        ))
 
         conn.commit()
         cursor.close()
         conn.close()
 
+        print(f"✅ Inserted/updated chunk {chunk_id} with embedding into Snowflake.")
+
     except Exception as e:
-        logger.error(f"Error inserting chunk {chunk_id} into Snowflake: {e}")
-        raise
+        print(f"❌ Error inserting/updating chunk {chunk_id} into Snowflake: {e}")
