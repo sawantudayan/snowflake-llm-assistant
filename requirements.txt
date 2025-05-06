@@ -1,0 +1,15 @@
+# Core dependencies
+streamlit
+python-dotenv==1.0.1
+requests==2.31.0
+pymupdf==1.23.22
+snowflake-connector-python
+faiss-cpu
+transformers
+torch
+
+# Optional but recommended
+tqdm==4.66.4
+
+# For better data handling
+pandas==2.2.2
