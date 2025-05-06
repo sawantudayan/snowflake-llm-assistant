@@ -3,14 +3,20 @@ import uuid
 from typing import List
 
 import fitz
+import nltk
 import requests
 import streamlit as st
 from dotenv import load_dotenv
+from nltk.tokenize import sent_tokenize
 
 from utils.snowflake_connector import get_snowflake_connection
 
+# Load environment variables
 load_dotenv()
 HF_API_KEY = os.getenv("HF_API_KEY")
+
+# Download sentence tokenizer (only once)
+nltk.download('punkt')
 
 # Snowflake connection setup
 conn = get_snowflake_connection()
@@ -23,31 +29,56 @@ def extract_text_from_pdf(uploaded_file):
     return text
 
 
-# Chunk the text
 def chunk_text(text: str, max_tokens: int = 512) -> List[str]:
     paragraphs = text.split("\n\n")
     chunks = []
-    current = ""
+    current_chunk = ""
 
     for para in paragraphs:
-        if len(current.split()) + len(para.split()) < max_tokens:
-            current += "\n" + para
+        para = para.strip()
+        if not para:
+            continue
+
+        if len(current_chunk.split()) + len(para.split()) <= max_tokens:
+            current_chunk += "\n" + para if current_chunk else para
         else:
-            chunks.append(current.strip())
-            current = para
-    if current:
-        chunks.append(current.strip())
+            if len(para.split()) > max_tokens:
+                # Fallback: break long para into sentence-based chunks
+                sentences = sent_tokenize(para)
+                temp_chunk = ""
+                for sentence in sentences:
+                    if len(temp_chunk.split()) + len(sentence.split()) <= max_tokens:
+                        temp_chunk += " " + sentence if temp_chunk else sentence
+                    else:
+                        chunks.append(temp_chunk.strip())
+                        temp_chunk = sentence
+                if temp_chunk:
+                    chunks.append(temp_chunk.strip())
+            else:
+                if current_chunk:
+                    chunks.append(current_chunk.strip())
+                current_chunk = para
+
+    if current_chunk:
+        chunks.append(current_chunk.strip())
+
     return chunks
 
 
+def is_model_ready():
+    health_url = "https://api-inference.huggingface.co/models/facebook/bart-large-mnli"
+    headers = {"Authorization": f"Bearer {HF_API_KEY}"}
+    response = requests.get(health_url, headers=headers)
+    return response.status_code == 200
+
+
 # Classify text using Hugging Face - BART LARGE
-# TEMPORARY fallback until Cortex is working
 def classify_text(text_chunk):
     labels = ["Invoice", "Contract", "Policy", "Technical Spec", "Meeting Notes", "Other"]
     api_url = "https://api-inference.huggingface.co/models/facebook/bart-large-mnli"
 
     payload = {
-        "inputs": text_chunk[:1000],  # Trim long text for safety
+        "inputs": text_chunk[:1000],  # Trim for token limits
         "parameters": {"candidate_labels": labels}
     }
 
@@ -58,7 +89,8 @@ def classify_text(text_chunk):
         result = response.json()
         return result["labels"][0]
     else:
-        raise RuntimeError(f"HF API error: {response.status_code} - {response.text}")
+        st.error(f"HF API error: {response.status_code} - {response.text}")
+        return "Other"  # Fallback category
 
 
 # Insert into Snowflake
@@ -87,20 +119,31 @@ st.title("Snowflake LLM Assistant")
 
 uploaded_file = st.file_uploader("Upload your PDF", type=["pdf"])
 if uploaded_file is not None:
-    st.info("Extracting text and classifying...")
+    st.info("Extracting and processing...")
 
-    # Extract and process
+    # Step 1: Extract text
     text = extract_text_from_pdf(uploaded_file)
+
+    # Step 2: Smart chunking
     chunks = chunk_text(text)
     first_chunk = chunks[0] if chunks else "No text found."
 
-    # Connect and store
+    # Step 3: Classify document
     conn = get_snowflake_connection()
     document_id = str(uuid.uuid4())
-    category = classify_text(first_chunk)
+
+    if is_model_ready():
+        with st.spinner("Classifying document type using Hugging Face model..."):
+            category = classify_text(first_chunk)
+    else:
+        st.warning("Hugging Face model is not ready. Defaulting to 'Other'.")
+        category = "Other"
+
+    # Step 4: Upload to Snowflake
     insert_document(conn, document_id, uploaded_file.name, category)
     insert_chunks(conn, document_id, chunks)
 
+    # Step 5: UI Feedback
     st.success(f"Uploaded and classified as **{category}**")
-    st.write(f"Classified as:", category)
-    st.write(f"Total chunks stored: {len(chunks)}")
+    st.write("Classification:", category)
+    st.write("Total chunks stored:", len(chunks))
