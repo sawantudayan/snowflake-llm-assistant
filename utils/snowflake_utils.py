@@ -1,3 +1,5 @@
+import json
+import logging
 import os
 
 import snowflake.connector
@@ -5,6 +7,7 @@ from dotenv import load_dotenv
 
 # Load environment variables from .env
 load_dotenv()
+logger = logging.getLogger(__name__)
 
 
 def get_snowflake_connection():
@@ -48,3 +51,32 @@ def fetch_chunks_from_snowflake():
     conn.close()
 
     return chunks
+
+
+def insert_embeddings_to_snowflake(chunk_id, document_id, chunk_text, embedding):
+    """
+    Insert embedding as proper VARIANT using parse_json() wrapper.
+    Embedding is passed as a JSON string to be interpreted as VARIANT in Snowflake.
+    """
+    try:
+        conn = get_snowflake_connection()
+        cursor = conn.cursor()
+
+        insert_query = """
+        INSERT INTO GENAI_ASSISTANT.UNSTRUCTURED_DATA.DOCUMENT_CHUNKS 
+        (CHUNK_ID, DOCUMENT_ID, CHUNK_TEXT, EMBEDDING)
+        SELECT %s, %s, %s, PARSE_JSON(%s)
+        """
+
+        embedding_json = json.dumps(embedding)
+        logger.info(f"Inserting chunk: {chunk_id}, embedding_dim: {len(embedding)}")
+
+        cursor.execute(insert_query, (chunk_id, document_id, chunk_text, embedding_json))
+
+        conn.commit()
+        cursor.close()
+        conn.close()
+
+    except Exception as e:
+        logger.error(f"Error inserting chunk {chunk_id} into Snowflake: {e}")
+        raise
