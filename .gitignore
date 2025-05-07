@@ -175,3 +175,7 @@ cython_debug/
 .idea/
 .venv/
 .env
+chunk_ids.txt
+chunk_metadata.pkl
+faiss_index.bin
+vector_index.faiss
